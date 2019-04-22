@@ -1132,6 +1132,33 @@ describe('Manager', () => {
             expect(rendered).to.contain('<h1>default message</h1>');
         });
 
+        it('renders with a global context async function', async () => {
+
+            const getQuery = () => Promise.resolve('promise');
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: require('handlebars') },
+                path: __dirname + '/templates',
+
+                context: async function (request) {
+
+                    return {
+                        message: request ? request.route.path : 'default message',
+
+                        query: {
+                            test: await getQuery()
+                        }
+                    };
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext');
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>promise</h1>');
+            expect(rendered).to.contain('<h1>default message</h1>');
+        });
+
         it('overrides the global context function values with local values', async () => {
 
             const server = Hapi.server();
