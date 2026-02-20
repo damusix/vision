@@ -1,0 +1,2287 @@
+import Fs from 'node:fs';
+import Path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+import * as Code from '@hapi/code';
+import Handlebars from 'handlebars';
+import * as Hapi from '@hapi/hapi';
+import * as Lab from '@hapi/lab';
+import Mustache from 'mustache';
+import Pug from 'pug';
+import * as Vision from '../lib/index.js';
+
+import Manager from '../lib/manager.js';
+import Utils from '../lib/utils.js';
+
+const require = createRequire(import.meta.url);
+
+const internals = {};
+
+const __dirname = Path.dirname(fileURLToPath(import.meta.url));
+
+const lab = Lab.script();
+export { lab };
+const { it, describe } = lab;
+const expect = Code.expect;
+
+
+describe('Manager', () => {
+
+    it('renders handlebars template', async () => {
+
+        const server = Hapi.server();
+
+        await server.register(Vision);
+
+        server.views({
+            engines: {
+                html: {
+                    module: Handlebars,
+                    path: __dirname + '/templates/valid'
+                }
+            }
+        });
+
+        server.route({ method: 'GET', path: '/handlebars', handler: { view: { template: 'test.html', context: { message: 'Hello World!' } } } });
+
+        const res = await server.inject('/handlebars');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(200);
+    });
+
+    it('shallow copies global context', () => {
+
+        const options = {
+            engines: {
+                html: {
+                    module: Handlebars,
+                    path: __dirname + '/templates/valid'
+                }
+            },
+            context: {
+                a: 1
+            }
+        };
+
+        const server = Hapi.server();
+        const manager = new Manager(server, options);
+        expect(manager._context).to.equal(options.context);
+    });
+
+    it('sets content type', async () => {
+
+        const server = Hapi.server();
+        await server.register(Vision);
+        server.views({
+            engines: {
+                html: {
+                    module: Handlebars,
+                    path: __dirname + '/templates/valid',
+                    contentType: 'something/else'
+                }
+            }
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello World!' } } } });
+        const res = await server.inject('/');
+        expect(res.headers['content-type']).to.equal('something/else');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(200);
+    });
+
+    it('errors on invalid template path', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/invalid'
+        });
+
+        // Rendering errors are not available to extensions.
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello, World!' } } } });
+        const res = await server.inject('/');
+        expect(res.statusCode).to.equal(500);
+    });
+
+    it('returns a compiled Handlebars template reply', async () => {
+
+        const server = Hapi.server();
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello, World!' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.result).to.have.string('Hello, World!');
+        expect(res.statusCode).to.equal(200);
+    });
+
+    it('errors absolute path given and allowAbsolutePath is false (by default)', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        // Compilation errors sould be available for extensions.
+
+        let error = null;
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            if (response.isBoom) {
+                error = response;
+            }
+
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: __dirname + '/templates/valid/test', context: { message: 'Hello, World!' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(500);
+        expect(error).to.be.an.error();
+    });
+
+    it('errors if path given includes ../ and allowInsecureAccess is false (by default)', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        // Compilation errors sould be available for extensions.
+
+        let error = null;
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            if (response.isBoom) {
+                error = response;
+            }
+
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: '../test', context: { message: 'Hello, World!' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(500);
+        expect(error).to.be.an.error();
+    });
+
+    it('allows if path given includes ../ and allowInsecureAccess is true', async () => {
+
+        const server = Hapi.server();
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            allowInsecureAccess: true,
+            path: __dirname + '/templates/valid/helpers'
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: '../test', context: { message: 'Hello, World!' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.result).to.have.string('Hello, World!');
+        expect(res.statusCode).to.equal(200);
+    });
+
+    it('errors if template does not exist', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        // Compilation errors sould be available for extensions.
+
+        let error = null;
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            if (response.isBoom) {
+                error = response;
+            }
+
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'testNope', context: { message: 'Hello, World!' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(500);
+        expect(error).to.be.an.error();
+    });
+
+    it('errors if template is a directory', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/invalid'
+        });
+
+        // Compilation errors sould be available for extensions.
+
+        let error = null;
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            if (response.isBoom) {
+                error = response;
+            }
+
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'dir' } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(500);
+        expect(error).to.be.an.error();
+    });
+
+    it('errors if engine.compile throws', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        // Compilation errors sould be available for extensions.
+
+        let error = null;
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            if (response.isBoom) {
+                error = response;
+            }
+
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'badmustache', context: { message: 'Hello, World!' }, options: { path: __dirname + '/templates/valid/invalid' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(500);
+        expect(error).to.be.an.error();
+    });
+
+    it('should not fail if rendered template returns undefined', async () => {
+
+        const server = Hapi.server();
+        await server.register(Vision);
+        server.views({
+            engines: {
+                html: {
+                    module: {
+                        compile: function (template, compileOptions) {
+
+                            return function (context, renderOptions) {
+
+                                return undefined;
+                            };
+                        }
+                    },
+                    path: __dirname + '/templates/valid'
+                }
+            }
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test.html' } } });
+
+        const res = await server.inject('/');
+        expect(res.statusCode).to.be.within(200, 204);
+    });
+
+    it('allows the context to be modified by extensions', async () => {
+
+        const server = Hapi.server();
+        await server.register(Vision);
+        server.views({
+            engines: { html: Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        server.ext('onPreResponse', (request, h) => {
+
+            const response = request.response;
+            response.source.context.message = 'goodbye';
+            return h.continue;
+        });
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test.html', context: { message: 'hello' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.result).not.to.contain('hello');
+        expect(res.result).to.contain('goodbye');
+        expect(res.statusCode).to.equal(200);
+    });
+
+    describe('with engine initialization', () => {
+
+        it('modifies the engine options', async () => {
+
+            let compileOptions;
+            let runtimeOptions;
+
+            const server = Hapi.server();
+            const manager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compile: function (string, options1) {
+
+                            compileOptions = options1;
+
+                            return function (context, options2) {
+
+                                runtimeOptions = options2;
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            options.compileOptions = { stage: 'compile' };
+                            options.runtimeOptions = { stage: 'render' };
+                            return next();
+                        }
+                    }
+                }
+            });
+
+            await manager.render('valid/test');
+            expect(compileOptions).to.include({ stage: 'compile' });
+            expect(runtimeOptions).to.include({ stage: 'render' });
+        });
+
+        it('errors if initialization fails', async () => {
+
+            const server = Hapi.server();
+            const manager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compile: function (string, options1) {
+
+                            return function (context, options2) {
+
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            return next(new Error('Initialization failed'));
+                        }
+                    }
+                }
+            });
+
+            await expect(manager.render('valid/test')).to.reject('Initialization failed');
+        });
+
+        it('errors if initialization throws', async () => {
+
+            const server = Hapi.server();
+            const manager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compile: function (string, options1) {
+
+                            return function (context, options2) {
+
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            throw new Error('Initialization error');
+                        }
+                    }
+                }
+            });
+
+            await expect(manager.render('valid/test')).to.reject('Initialization error');
+        });
+
+        it('throws on invalid options', () => {
+
+            expect(() => {
+
+                const server = Hapi.server();
+                new Manager(server, {
+                    path: __dirname + '/templates',
+                    engines: {
+                        html: {
+                            compile: function (string, options1) {
+
+                                return function (context, options2) {
+
+                                    return string;
+                                };
+                            },
+
+                            prepare: function (options, next) {
+
+                                throw new Error('Initialization error');
+                            }
+                        }
+                    },
+                    badValue: 'badValue'
+                });
+            })
+                .to.throw(/"badValue" is not allowed/);
+        });
+
+        it('only initializes once before rendering', async () => {
+
+            let initialized = 0;
+
+            const server = Hapi.server();
+            const manager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compile: function (string, options1) {
+
+                            return function (context, options2) {
+
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            ++initialized;
+                            return next();
+                        }
+                    }
+                }
+            });
+
+            expect(initialized).to.equal(0);
+            const rendered1 = await manager.render('valid/test');
+            expect(rendered1).to.exist();
+            expect(initialized).to.equal(1);
+
+            const rendered2 = await manager.render('valid/test');
+            expect(rendered2).to.exist();
+            expect(initialized).to.equal(1);
+        });
+
+        it('initializes multiple engines independently', async () => {
+
+            let htmlOptions;
+            let jadeOptions;
+
+            const server = Hapi.server();
+            const manager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compile: function (string, options1) {
+
+                            htmlOptions = options1;
+                            return function (context, options2) {
+
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            options.compileOptions = { engine: 'handlebars' };
+                            return next();
+                        }
+                    },
+
+                    pug: {
+                        compile: function (string, options1) {
+
+                            jadeOptions = options1;
+                            return function (context, options2) {
+
+                                return string;
+                            };
+                        },
+
+                        prepare: function (options, next) {
+
+                            options.compileOptions = { engine: 'pug' };
+                            return next();
+                        }
+                    }
+                }
+            });
+
+            const rendered1 = await manager.render('valid/test.html');
+            expect(rendered1).to.exist();
+            expect(htmlOptions).to.include({ engine: 'handlebars' });
+            expect(jadeOptions).to.not.exist();
+
+            const rendered2 = await manager.render('valid/test.pug');
+            expect(rendered2).to.exist();
+            expect(jadeOptions).to.include({ engine: 'pug' });
+        });
+    });
+
+    it('should not error on layoutKeyword conflict', async () => {
+
+        const server = Hapi.server({ debug: false });
+        await server.register(Vision);
+        server.views({
+            engines: { 'html': Handlebars },
+            path: __dirname + '/templates/valid'
+        });
+
+        // Rendering errors are not available to extensions.
+
+        server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello, World!', content: 'fail' } } } });
+
+        const res = await server.inject('/');
+        expect(res.result).to.exist();
+        expect(res.statusCode).to.equal(200);
+        expect(res.payload).to.contain('Hello, World!');
+    });
+
+    describe('with layout', () => {
+
+        it('returns response', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('<!DOCTYPE html>\n<html>\n    <head>\n        <title>test</title>\n    </head>\n    <body>\n        <div>\n    <h1>Hapi</h1>\n</div>\n\n    </body>\n</html>\n');
+        });
+
+        it('returns response with relativeTo and absolute path', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                relativeTo: '/none/shall/pass',
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('<!DOCTYPE html>\n<html>\n    <head>\n        <title>test</title>\n    </head>\n    <body>\n        <div>\n    <h1>Hapi</h1>\n</div>\n\n    </body>\n</html>\n');
+        });
+
+        it('returns response with layout override', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' }, options: { layout: 'otherLayout' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('test:<div>\n    <h1>Hapi</h1>\n</div>\n');
+        });
+
+        it('returns response with custom server layout', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: 'otherLayout'
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('test:<div>\n    <h1>Hapi</h1>\n</div>\n');
+        });
+
+        it('returns response with custom server layout and path', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                relativeTo: __dirname,
+                path: 'templates',
+                layoutPath: 'templates/layout',
+                layout: 'elsewhere'
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('test+<div>\n    <h1>Hapi</h1>\n</div>\n');
+        });
+
+        it('errors on missing layout', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: 'missingLayout'
+            });
+
+            // Compilation errors sould be available for extensions.
+
+            let error = null;
+            server.ext('onPreResponse', (request, h) => {
+
+                const response = request.response;
+                if (response.isBoom) {
+                    error = response;
+                }
+
+                return h.continue;
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.statusCode).to.equal(500);
+            expect(error).to.be.an.error();
+        });
+
+        it('errors on invalid layout', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: 'invalidLayout'
+            });
+
+            // Compilation errors sould be available for extensions.
+
+            let error = null;
+            server.ext('onPreResponse', (request, h) => {
+
+                const response = request.response;
+                if (response.isBoom) {
+                    error = response;
+                }
+
+                return h.continue;
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' } } } });
+
+            const res = await server.inject('/');
+            expect(res.statusCode).to.equal(500);
+            expect(error).to.be.an.error();
+        });
+
+        it('returns response without layout', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'valid/test', context: { title: 'test', message: 'Hapi' }, options: { layout: false } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+            expect(res.result.replace(/\r/g, '')).to.equal('<div>\n    <h1>Hapi</h1>\n</div>\n');
+        });
+
+        it('errors on layoutKeyword conflict', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates/valid',
+                layout: true
+            });
+
+            // Rendering errors are not available to extensions.
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello, World!', content: 'fail' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(500);
+        });
+
+        it('errors absolute path given and allowAbsolutePath is false (by default)', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                engines: { 'html': Handlebars },
+                path: __dirname + '/templates/valid',
+                layout: true
+            });
+
+            // Compilation errors sould be available for extensions.
+
+            let error = null;
+            server.ext('onPreResponse', (request, h) => {
+
+                const response = request.response;
+                if (response.isBoom) {
+                    error = response;
+                }
+
+                return h.continue;
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { title: 'test', message: 'Hapi' }, options: { path: __dirname + '/templates/valid/invalid' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(500);
+            expect(error).to.be.an.error();
+        });
+    });
+
+    describe('with multiple engines', () => {
+
+        it('renders handlebars template', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                path: __dirname + '/templates/valid',
+                engines: {
+                    'html': Handlebars,
+                    'pug': Pug,
+                    'hbar': {
+                        module: {
+                            compile: function (engine) {
+
+                                return engine.compile;
+                            }
+                        }
+                    }
+                }
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'test.html', context: { message: 'Hello World!' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+        });
+
+        it('renders pug template', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                path: __dirname + '/templates/valid',
+                engines: {
+                    'html': Handlebars,
+                    'pug': Pug,
+                    'hbar': {
+                        module: {
+                            compile: function (engine) {
+
+                                return engine.compile;
+                            }
+                        }
+                    }
+                }
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'testMulti.pug', context: { message: 'Hello World!' } } } });
+
+            const res = await server.inject('/');
+            expect(res.result).to.exist();
+            expect(res.statusCode).to.equal(200);
+        });
+
+        it('returns 500 on unknown extension', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                path: __dirname + '/templates/valid',
+                engines: {
+                    'html': Handlebars,
+                    'pug': Pug,
+                    'hbar': {
+                        module: {
+                            compile: function (engine) {
+
+                                return engine.compile;
+                            }
+                        }
+                    }
+                }
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'test', context: { message: 'Hello World!' } } } });
+
+            const res = await server.inject('/');
+            expect(res.statusCode).to.equal(500);
+        });
+
+        it('returns 500 on missing extension engine', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                path: __dirname + '/templates/valid',
+                engines: {
+                    'html': Handlebars,
+                    'pug': Pug,
+                    'hbar': {
+                        module: {
+                            compile: function (engine) {
+
+                                return engine.compile;
+                            }
+                        }
+                    }
+                }
+            });
+
+            server.route({ method: 'GET', path: '/', handler: { view: { template: 'test.xyz', context: { message: 'Hello World!' } } } });
+
+            const res = await server.inject('/');
+            expect(res.statusCode).to.equal(500);
+        });
+    });
+
+    it('manager gives engine via "getEngine"', async () => {
+
+        const rootServer = Hapi.server();
+        const relativeToPath = 'test/templates';
+
+        await rootServer.register({
+            plugin: Vision,
+            options: {
+                engines: { html: Handlebars.create() },
+                relativeTo: relativeToPath,
+                path: 'valid'
+            }
+        });
+
+        const one = {
+            name: 'one',
+            register: async function (server, options) {
+
+                await server.register({
+                    plugin: Vision,
+                    options: {
+                        engines: {
+                            html: Handlebars,
+                            pug: Pug
+                        },
+                        relativeTo: Path.join(__dirname, '/templates'),
+                        path: 'plugin'
+                    }
+                });
+
+                const manager = server.getViewsManager();
+
+                expect(() => {
+
+                    manager.getEngine().config;
+                }).to.throw(/Must provide an extension or set defaultExtension in manager options/);
+
+                expect(() => {
+
+                    manager.getEngine('bogusExtension').config;
+                }).to.throw(/Extension \"bogusExtension\" not found on manager/);
+
+
+                const htmlConfig = manager.getEngine('html').config;
+                expect(htmlConfig.path).to.equal('plugin');
+
+                server.route({
+                    path: '/viewPluginOne',
+                    method: 'GET',
+                    handler: (request, h) => {
+
+                        return h.view('test', { message: 'Plugin One' });
+                    }
+                });
+            }
+        };
+
+        await rootServer.register(one);
+        const rootManager = rootServer.getViewsManager();
+        const htmlConfig = rootManager.getEngine().config;
+        const htmlConfigByKey = rootManager.getEngine('html').config;
+
+        expect(htmlConfigByKey).to.equal(htmlConfig);
+        expect(htmlConfig.relativeTo).to.equal(relativeToPath);
+        expect(htmlConfig.path).to.equal('valid');
+        expect(rootServer.getViewsManager().getEngine().config).to.equal(htmlConfig);
+    });
+
+    describe('render()', () => {
+
+        it('renders with async compile', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'async',
+                        module: {
+                            compile: function (string, options, callback) {
+
+                                const compiled = Handlebars.compile(string, options);
+                                const renderer = function (context, opt, next) {
+
+                                    return next(null, compiled(context, opt));
+                                };
+
+                                return callback(null, renderer);
+                            }
+                        }
+                    }
+                }
+            });
+
+            const rendered = await views.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('errors on sync compile that throws', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'sync',
+                        module: {
+                            compile: function (string, options) {
+
+                                throw (new Error('Bad bad view'));
+                            }
+                        }
+                    }
+                }
+            });
+
+            await expect(views.render('valid/test', { title: 'test', message: 'Hapi' })).to.reject('Bad bad view');
+        });
+
+        it('allows valid (no layouts)', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: false
+            });
+
+            const rendered = await testView.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('renders without context', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates'
+            });
+
+            const rendered = await testView.render('valid/test');
+            expect(rendered).to.exist();
+            expect(rendered.replace(/\r/g, '')).to.equal('<div>\n    <h1></h1>\n</div>\n');
+        });
+
+        it('renders without handler/global-context (with layout)', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            const rendered = await testView.render('valid/test');
+            expect(rendered).to.exist();
+            expect(rendered.replace(/\r/g, '')).to.contain('<div>\n    <h1></h1>\n</div>\n');
+        });
+
+        it('renders with a global context object', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: {
+                    message: 'default message',
+
+                    query: {
+                        test: 'global'
+                    }
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext');
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>global</h1>');
+            expect(rendered.replace(/\r/g, '')).to.contain('<h1>default message</h1>');
+        });
+
+        it('overrides the global context object with local values', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: {
+                    message: 'default message',
+
+                    query: {
+                        test: 'global'
+                    }
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext', { message: 'override' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>global</h1>');
+            expect(rendered).to.contain('<h1>override</h1>');
+        });
+
+        it('renders with a global context function (no request)', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: function (request) {
+
+                    return {
+                        message: 'default message',
+
+                        query: {
+                            test: 'global'
+                        }
+                    };
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext');
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>global</h1>');
+            expect(rendered).to.contain('<h1>default message</h1>');
+        });
+
+        it('renders with an async global context function (no request)', async () => {
+
+            const asyncFn = async () => await 'from async';
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: async function (request) {
+
+                    return {
+                        message: 'default message',
+
+                        query: {
+                            test: await asyncFn()
+                        }
+                    };
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext');
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>from async</h1>');
+            expect(rendered).to.contain('<h1>default message</h1>');
+        });
+
+        it('renders with a global context function that returns a promise (no request)', async () => {
+
+            const renderPromise = Promise.resolve({
+                message: 'default message',
+
+                query: {
+                    test: 'from promise'
+                }
+            });
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: () => renderPromise
+            });
+
+            const rendered = await testView.render('valid/testContext');
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>from promise</h1>');
+            expect(rendered).to.contain('<h1>default message</h1>');
+        });
+
+        it('overrides the global context function values with local values', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+
+                context: function () {
+
+                    return {
+                        message: 'default message',
+
+                        query: {
+                            test: 'global'
+                        }
+                    };
+                }
+            });
+
+            const rendered = await testView.render('valid/testContext', { message: 'override' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>global</h1>');
+            expect(rendered).to.contain('<h1>override</h1>');
+        });
+
+        it('uses specified default ext', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                defaultExtension: 'html',
+                engines: { html: Handlebars, pug: Pug },
+                path: __dirname + '/templates'
+            });
+
+            const rendered = await testView.render('valid/test');
+            expect(rendered).to.exist();
+            expect(rendered.replace(/\r/g, '')).to.equal('<div>\n    <h1></h1>\n</div>\n');
+        });
+
+        it('allows relative path with no base', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: './test/templates',
+                layout: false
+            });
+
+            const rendered = await testView.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered.replace(/\r/g, '')).to.equal('<div>\n    <h1>Hapi</h1>\n</div>\n');
+        });
+
+        it('allows multiple relative paths with no base', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: ['./test/templates/layout', './test/templates/valid'],
+                layout: false
+            });
+
+            const rendered = await testView.render('test', { message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>Hapi</h1>');
+        });
+
+        it('allows multiple relative paths with a base', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                relativeTo: __dirname + '/templates',
+                path: ['layout', 'valid'],
+                layout: false
+            });
+
+            const rendered = await testView.render('test', { message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered.replace(/\r/g, '')).to.contain('<h1>Hapi</h1>');
+        });
+
+        it('uses the first matching template', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                relativeTo: __dirname + '/templates',
+                path: ['valid', 'invalid'],
+                layout: false
+            });
+
+            const rendered = await testView.render('test', { message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>Hapi</h1>');
+        });
+
+        it('allows multiple absolute paths', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: [__dirname + '/templates/layout', __dirname + '/templates/valid'],
+                layout: false
+            });
+
+            const rendered = await testView.render('test', { message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('<h1>Hapi</h1>');
+        });
+
+        it('allows valid (with layouts)', async () => {
+
+            const server = Hapi.server();
+            const testViewWithLayouts = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            const rendered = await testViewWithLayouts.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('allows absolute path', async () => {
+
+            const server = Hapi.server();
+            const testViewWithLayouts = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: __dirname + '/templates/layout',
+                allowAbsolutePaths: true
+            });
+
+            const rendered = await testViewWithLayouts.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.exist();
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('errors on invalid layout', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: 'badlayout'
+            });
+
+            await expect(views.render('valid/test', { title: 'test', message: 'Hapi' })).to.reject('Parse error on line 1:\n{{}\n--^\nExpecting \'ID\', \'STRING\', \'NUMBER\', \'BOOLEAN\', \'UNDEFINED\', \'NULL\', \'DATA\', got \'INVALID\': Parse error on line 1:\n{{}\n--^\nExpecting \'ID\', \'STRING\', \'NUMBER\', \'BOOLEAN\', \'UNDEFINED\', \'NULL\', \'DATA\', got \'INVALID\'');
+        });
+
+        it('errors on layout compile error', async (flags) => {
+
+            const orig = Utils.readFile;
+            Utils.readFile = (file, encoding) => {
+
+                throw new Error('Invalid file');
+            };
+
+            flags.onCleanup = () => {
+
+                Utils.readFile = orig;
+            };
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: 'layout'
+            });
+
+            await expect(views.render('valid/test', { title: 'test', message: 'Hapi' })).to.reject(/valid[\\\/]test\.html/);
+        });
+
+        it('errors on invalid layout path', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: '/badlayout'
+            });
+
+            await expect(views.render('valid/test', { title: 'test', message: 'Hapi' })).to.reject('Absolute paths are not allowed in views');
+        });
+
+        it('allows multiple layout paths', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                engines: { html: Handlebars },
+                relativeTo: __dirname + '/templates',
+                path: 'valid',
+                layoutPath: ['invalid', 'layout'],
+                layout: 'elsewhere'
+            });
+
+            const rendered = await views.render('test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('uses the first matching layout', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                engines: { html: Handlebars },
+                relativeTo: __dirname,
+                path: 'templates/valid',
+                layoutPath: ['templates', 'templates/invalid'],
+                layout: true
+            });
+
+            const rendered = await views.render('test', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('allows valid pug layouts', async () => {
+
+            const server = Hapi.server();
+            const testViewWithJadeLayouts = new Manager(server, {
+                engines: { pug: Pug },
+                path: __dirname + '/templates' + '/valid/',
+                layout: true
+            });
+
+            const rendered = await testViewWithJadeLayouts.render('index', { title: 'test', message: 'Hapi' });
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('should work and not throw without pug layouts', async () => {
+
+            const server = Hapi.server();
+            const testViewWithoutJadeLayouts = new Manager(server, {
+                engines: { pug: Pug },
+                path: __dirname + '/templates' + '/valid/',
+                layout: false
+            });
+
+            const rendered = await testViewWithoutJadeLayouts.render('test', { title: 'test', message: 'Hapi Message' });
+            expect(rendered).to.contain('Hapi Message');
+        });
+
+        it('allows relativeTo, template name, and no path', async () => {
+
+            const server = Hapi.server();
+            const views = new Manager(server, { engines: { html: Handlebars } });
+            const rendered = await views.render('test', { title: 'test', message: 'Hapi' }, { relativeTo: __dirname + '/templates/valid' });
+            expect(rendered).to.contain('Hapi');
+        });
+
+        it('errors when referencing non existant partial (with layouts)', async () => {
+
+            const server = Hapi.server();
+            const testViewWithLayouts = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            await expect(testViewWithLayouts.render('invalid/test', { title: 'test', message: 'Hapi' })).to.reject();
+        });
+
+        it('errors when referencing non existant partial (no layouts)', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: false
+            });
+
+            await expect(testView.render('invalid/test', { title: 'test', message: 'Hapi' })).to.reject();
+        });
+
+        it('errors if context uses layoutKeyword as a key', async () => {
+
+            const server = Hapi.server();
+            const testViewWithLayouts = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: true
+            });
+
+            const opts = { title: 'test', message: 'Hapi', content: 1 };
+            await expect(testViewWithLayouts.render('valid/test', opts)).to.reject();
+        });
+
+        it('errors on compile error (invalid template code)', async () => {
+
+            const server = Hapi.server();
+            const testView = new Manager(server, {
+                engines: { html: Handlebars },
+                path: __dirname + '/templates',
+                layout: false
+            });
+
+            await expect(testView.render('invalid/badmustache', { title: 'test', message: 'Hapi' })).to.reject();
+        });
+
+        it('loads partials and be able to render them', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: __dirname + '/templates/valid/partials'
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('normalizes full partial name (windows)', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: __dirname + '/templates/valid/partials'
+            });
+
+            const rendered = await tempView.render('testPartialsName', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partials from relative path without base', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: './test/templates/valid/partials'
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partals from multiple relative paths without base', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: ['./test/templates/invalid', './test/templates/valid/partials']
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partals from multiple relative paths with base', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                relativeTo: __dirname + '/templates',
+                path: 'valid',
+                partialsPath: ['invalid', 'valid/partials']
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partials from multiple absolute paths', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: [__dirname + '/templates/invalid', __dirname + '/templates/valid/partials']
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partials from relative path without base (no dot)', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: 'test/templates/valid/partials'
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal(' Nav:<nav>Nav</nav>|<nav>Nested</nav>');
+        });
+
+        it('loads partials and render them EVEN if viewsPath has trailing slash', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                partialsPath: __dirname + '/templates/valid/partials/'
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.exist();
+            expect(rendered.length).above(1);
+        });
+
+        it('skips loading partials and helpers if engine does not support them', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                path: __dirname + '/templates/valid',
+                partialsPath: __dirname + '/templates/valid/partials',
+                helpersPath: __dirname + '/templates/valid/helpers',
+                engines: { html: Pug }
+            });
+
+            const rendered = await tempView.render('testPartials', {});
+            expect(rendered).to.equal('Nav:{{> nav}}|{{> nested/nav}}');
+        });
+
+        it('loads ESM default export helpers and render them', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                helpersPath: __dirname + '/templates/valid/helpers'
+            });
+
+            const rendered = await tempView.render('testHelpersESMDefault', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>\n');
+        });
+
+        it('loads ESM named export helpers and render them', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                helpersPath: __dirname + '/templates/valid/helpers'
+            });
+
+            const rendered = await tempView.render('testHelpersESMNamedExport', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>\n');
+        });
+
+        it('loads helpers and render them', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                helpersPath: __dirname + '/templates/valid/helpers'
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('loads helpers and render them when helpersPath ends with a slash', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: __dirname + '/templates/valid',
+                helpersPath: __dirname + '/templates/valid/helpers/'
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('loads helpers using relative paths', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                relativeTo: './test/templates',
+                path: './valid',
+                helpersPath: './valid/helpers'
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('loads helpers from multiple paths without a base', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                path: './test/templates/valid',
+                helpersPath: ['./test/templates/valid/helpers/tools', './test/templates/valid/helpers']
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('loads helpers from multiple paths with a base', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                relativeTo: './test/templates',
+                path: './valid',
+                helpersPath: ['./valid/helpers/tools', './valid/helpers']
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('loads helpers using relative paths (without dots)', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },    // Clear environment from other tests
+                relativeTo: 'test/templates',
+                path: 'valid',
+                helpersPath: 'valid/helpers'
+            });
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all UPPERCASE and this is how we like it!</p>');
+        });
+
+        it('registers helpers programmatically', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: {
+                    html: { module: Handlebars.create() },
+                    txt: { module: Handlebars.create() }
+                },
+                relativeTo: 'test/templates',
+                path: 'valid'
+            });
+
+            tempView.registerHelper('long', (string) => string + string.substr(-1).repeat(2));
+            tempView.registerHelper('uppercase', (string) => string.toUpperCase());
+
+            const rendered1 = await tempView.render('testHelpers.html', { something: 'uppercase' });
+            expect(rendered1).to.equal('<p>This is all UPPERCASE and this is howww we like it!</p>');
+
+            const rendered2 = await tempView.render('testHelpers.txt', { something: 'uppercase' });
+            expect(rendered2).to.equal('This is all UPPERCASE and this is howww we like it!');
+        });
+
+        it('does not register helpers on engines that don\'t have helper support', async () => {
+
+            const server = Hapi.server();
+            const tempView = new Manager(server, {
+                engines: {
+                    html: {
+                        compile: function (template) {
+
+                            Mustache.parse(template);
+
+                            return function (context) {
+
+                                return Mustache.render(template, context);
+                            };
+                        }
+                    }
+                },
+                relativeTo: 'test/templates',
+                path: 'valid'
+            });
+
+            tempView.registerHelper('long', (string) => string + string.substr(-1).repeat(2));
+            tempView.registerHelper('uppercase', (string) => string.toUpperCase());
+
+            const rendered = await tempView.render('testHelpers', { something: 'uppercase' });
+            expect(rendered).to.equal('<p>This is all  and this is  we like it!</p>');
+        });
+
+        it('logs an error when helpers fail to load', async () => {
+
+            const server = Hapi.server();
+
+            const log = server.events.once('log');
+
+            new Manager(server, {
+                engines: { html: { module: Handlebars.create() } },
+                relativeTo: 'test/templates',
+                path: 'valid',
+                helpersPath: 'invalid/helpers'
+            });
+
+            const [event] = await log;
+            expect(event.tags).to.equal(['vision', 'helper', 'load', 'error']);
+        });
+
+        it('reuses cached compilation', async () => {
+
+            let gen = 0;
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'async',
+                        module: {
+                            compile: function (string, options, callback) {
+
+                                ++gen;
+                                const compiled = Handlebars.compile(string, options);
+                                const renderer = function (context, opt, next) {
+
+                                    return next(null, compiled(context, opt));
+                                };
+
+                                return callback(null, renderer);
+                            }
+                        }
+                    }
+                },
+                isCached: true // isCached defaults to `true`
+            });
+
+            const original = await views.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(original).to.exist();
+            expect(original).to.contain('Hapi');
+
+            const cached = await views.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(cached).to.exist();
+            expect(cached).to.contain('Hapi');
+
+            expect(gen).to.equal(1);
+        });
+
+        it('disables caching', async () => {
+
+            let gen = 0;
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'async',
+                        module: {
+                            compile: function (string, options, callback) {
+
+                                ++gen;
+                                const compiled = Handlebars.compile(string, options);
+                                const renderer = function (context, opt, next) {
+
+                                    return next(null, compiled(context, opt));
+                                };
+
+                                return callback(null, renderer);
+                            }
+                        }
+                    }
+                },
+                isCached: false
+            });
+
+            const original = await views.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(original).to.exist();
+            expect(original).to.contain('Hapi');
+
+            const notCached = await views.render('valid/test', { title: 'test', message: 'Joi' });
+            expect(notCached).to.exist();
+            expect(notCached).to.contain('Joi');
+
+            expect(gen).to.equal(2);
+        });
+
+        it('recompiles partials/helpers when caching is disabled', async () => {
+
+            const partialsPath = __dirname + '/templates/valid/partials';
+            const helpersPath = __dirname + '/templates/valid/helpers';
+
+            const originalPartialVal = '<nav>Nav</nav>';
+            const originalNestedPartialVal = '<nav>Nested</nav>';
+            const originalHelperVal = '\'use strict\';\n\nexports = module.exports = function (context) {\n\n    return context.toUpperCase();\n};\n';
+
+            const mutateToUppercaseVal = 'i want to be uppercase';
+
+            const resetMutatedValues = () => {
+
+                return new Promise((resolve, reject) => {
+
+                    Fs.writeFileSync(partialsPath + '/navToMutate.html', originalPartialVal);
+                    Fs.writeFileSync(partialsPath + '/nested/navToMutate.html', originalNestedPartialVal);
+                    Fs.writeFileSync(helpersPath + '/uppercaseToMutate.js', originalHelperVal);
+
+                    return resolve();
+                });
+            };
+
+            // Set everything correct to start in case a failed test leaves
+            // these in a mutated state
+
+            await resetMutatedValues();
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates/valid',
+                partialsPath,
+                helpersPath,
+                engines: {
+                    html: Handlebars
+                },
+                isCached: false
+            });
+
+            const originalPartialAndHelperValues = ' Nav:<nav>Nav</nav>|<nav>Nested</nav>\n<p>This is all I WANT TO BE UPPERCASE and this is how we like it!</p>';
+
+            const original = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(original).to.exist();
+            expect(original).to.equal(originalPartialAndHelperValues);
+
+            // Mutate the partials here
+
+            Fs.writeFileSync(partialsPath + '/navToMutate.html', '<nav>N4v With Changes</nav>');
+            Fs.writeFileSync(partialsPath + '/nested/navToMutate.html', '<nav>N3st3d With Changes</nav>');
+
+            // Mutate the helpers here
+
+            Fs.writeFileSync(helpersPath + '/uppercaseToMutate.js', '\'use strict\';\n\nexports = module.exports = function (context) {\n\n    return context.toUpperCase().split(\'\').sort().join(\'\').trim();\n};\n');
+
+            const mutatedPartialsAndHelper = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(mutatedPartialsAndHelper).to.exist();
+            expect(mutatedPartialsAndHelper).to.equal(' Nav:<nav>N4v With Changes</nav>|<nav>N3st3d With Changes</nav>\n<p>This is all AABCEEEINOPPRSTTUW and this is how we like it!</p>');
+
+            // Revert the mutations
+
+            await resetMutatedValues();
+
+            // Verify they've reverted correctly
+
+            const changedBack = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(changedBack).to.equal(originalPartialAndHelperValues);
+        });
+
+        it('does not recompile partials/helpers when caching is enabled', async () => {
+
+            const partialsPath = __dirname + '/templates/valid/partials';
+            const helpersPath = __dirname + '/templates/valid/helpers';
+
+            const originalPartialVal = '<nav>Nav</nav>';
+            const originalNestedPartialVal = '<nav>Nested</nav>';
+            const originalHelperVal = '\'use strict\';\n\nexports = module.exports = function (context) {\n\n    return context.toUpperCase();\n};\n';
+
+            const mutateToUppercaseVal = 'i want to be uppercase';
+
+            const resetMutatedValues = () => {
+
+                return new Promise((resolve, reject) => {
+
+                    Fs.writeFileSync(partialsPath + '/navToMutate.html', originalPartialVal);
+                    Fs.writeFileSync(partialsPath + '/nested/navToMutate.html', originalNestedPartialVal);
+                    Fs.writeFileSync(helpersPath + '/uppercaseToMutate.js', originalHelperVal);
+
+                    return resolve();
+                });
+            };
+
+            // Set everything correct to start in case a failed test leaves
+            // these in a mutated state
+
+            await resetMutatedValues();
+
+            const server = Hapi.server();
+            const views = new Manager(server, {
+                path: __dirname + '/templates/valid',
+                partialsPath,
+                helpersPath,
+                engines: {
+                    html: Handlebars
+                },
+                isCached: true
+            });
+
+            const originalPartialAndHelperValues = ' Nav:<nav>Nav</nav>|<nav>Nested</nav>\n<p>This is all I WANT TO BE UPPERCASE and this is how we like it!</p>';
+
+            const original = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(original).to.exist();
+            expect(original).to.equal(originalPartialAndHelperValues);
+
+            // Mutate the partials here
+
+            Fs.writeFileSync(partialsPath + '/navToMutate.html', '<nav>N4v With Changes</nav>');
+            Fs.writeFileSync(partialsPath + '/nested/navToMutate.html', '<nav>N3st3d With Changes</nav>');
+
+            // Mutate the helpers here
+
+            Fs.writeFileSync(helpersPath + '/uppercaseToMutate.js', '\'use strict\';\n\nexports = module.exports = function (context) {\n\n    return context.toUpperCase().split(\'\').sort().join(\'\').trim();\n};\n');
+
+            const mutatedPartialsAndHelper = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(mutatedPartialsAndHelper).to.exist();
+            expect(mutatedPartialsAndHelper).to.equal(originalPartialAndHelperValues);
+
+            // Revert the mutations
+
+            await resetMutatedValues();
+
+            // Verify they've reverted correctly
+
+            const changedBack = await views.render('testHelpersAndPartials', {
+                mutateToUppercase: mutateToUppercaseVal
+            });
+
+            expect(changedBack).to.equal(originalPartialAndHelperValues);
+        });
+    });
+
+    describe('clearCache()', () => {
+
+        it('clears cache given a path', async () => {
+
+            let gen = 0;
+            let gen2 = 0;
+
+            const server = Hapi.server();
+            const viewsManager = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'async',
+                        module: {
+                            compile: function (string, options, callback) {
+
+                                ++gen;
+                                const compiled = Handlebars.compile(string, options);
+                                const renderer = function (context, opt, next) {
+
+                                    return next(null, compiled(context, opt));
+                                };
+
+                                return callback(null, renderer);
+                            }
+                        }
+                    },
+                    pug: Pug
+                },
+                isCached: true
+            });
+
+            const viewsManager2 = new Manager(server, {
+                path: __dirname + '/templates',
+                engines: {
+                    html: {
+                        compileMode: 'async',
+                        module: {
+                            compile: function (string, options, callback) {
+
+                                ++gen2;
+                                const compiled = Handlebars.compile(string, options);
+                                const renderer = function (context, opt, next) {
+
+                                    return next(null, compiled(context, opt));
+                                };
+
+                                return callback(null, renderer);
+                            }
+                        }
+                    }
+                },
+                defaultExtension: 'html',
+                isCached: true
+            });
+
+            const original = await viewsManager.render('valid/test.html', { title: 'test', message: 'Hapi' });
+            expect(original).to.exist();
+            expect(original).to.contain('Hapi');
+
+            const cached = await viewsManager.render('valid/test.html', { title: 'test', message: 'Joi' });
+            expect(cached).to.exist();
+            expect(cached).to.contain('Joi');
+
+            expect(gen).to.equal(1);
+
+            const engine = viewsManager.getEngine('html');
+
+            viewsManager.clearCache('valid/test', engine);
+
+            const notCached = await viewsManager.render('valid/test.html', { title: 'test', message: 'Inert' });
+            expect(notCached).to.exist();
+            expect(notCached).to.contain('Inert');
+
+            expect(gen).to.equal(2);
+
+            // Err checks
+            expect(() => {
+
+                viewsManager.clearCache();
+            })
+                .to.throw(/template is required/);
+
+            expect(() => {
+
+                viewsManager.clearCache('valid/test');
+            })
+                .to.throw(/Must pass the engine, have a single engine on the manager, have an extension on the template name, or set defaultExtension on manager options/);
+
+            const original2 = await viewsManager2.render('valid/test', { title: 'test', message: 'Hapi' });
+            expect(original2).to.exist();
+            expect(original2).to.contain('Hapi');
+
+            const cached2 = await viewsManager2.render('valid/test', { title: 'test', message: 'Joi' });
+            expect(cached2).to.exist();
+            expect(cached2).to.contain('Joi');
+
+            expect(gen2).to.equal(1);
+
+            viewsManager2.clearCache('valid/test');
+
+            const notCached2 = await viewsManager2.render('valid/test', { title: 'test', message: 'Inert' });
+            expect(notCached2).to.exist();
+            expect(notCached2).to.contain('Inert');
+
+            expect(gen2).to.equal(2);
+
+            // Allow user-supplied suffix
+            viewsManager2.clearCache('valid/test.html');
+
+            const notCached3 = await viewsManager2.render('valid/test', { title: 'test', message: 'Vision' });
+            expect(notCached3).to.exist();
+            expect(notCached3).to.contain('Vision');
+
+            expect(gen2).to.equal(3);
+
+            // Warnings
+
+            const log = server.events.once('log');
+
+            viewsManager2.clearCache('some/bogus/path');
+
+            const [event] = await log;
+            expect(event.tags).to.equal(['vision', 'cache', 'clear', 'error']);
+        });
+    });
+
+    describe('_response()', () => {
+
+        it('sets Content-Type', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { html: Handlebars },
+                path: __dirname + '/templates/valid'
+            });
+
+            const handler = function (request, h) {
+
+                return h.view('test.html', { message: 'hi' });
+            };
+
+            server.route({ method: 'GET', path: '/', handler });
+            const res = await server.inject('/');
+            expect(res.headers['content-type']).to.contain('text/html');
+        });
+
+        it('does not override Content-Type', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+
+            server.views({
+                engines: { html: Handlebars },
+                path: __dirname + '/templates/valid'
+            });
+
+            const handler = function (request, h) {
+
+                return h.view('test.html', { message: 'hi' }).type('text/plain');
+            };
+
+            server.route({ method: 'GET', path: '/', handler });
+            const res = await server.inject('/');
+            expect(res.headers['content-type']).to.contain('text/plain');
+        });
+
+        it('errors on invalid template', async () => {
+
+            const server = Hapi.server({ debug: false });
+            await server.register(Vision);
+            server.views({
+                engines: { html: Handlebars },
+                path: __dirname + '/templates/invalid'
+            });
+
+            const handler = function (request, h) {
+
+                return h.view('test.html', { message: 'hi' });
+            };
+
+            server.route({ method: 'GET', path: '/', handler });
+            const res = await server.inject('/');
+            expect(res.statusCode).to.equal(500);
+        });
+
+        it('passes the response object to the global context function', async () => {
+
+            const server = Hapi.server();
+            await server.register(Vision);
+            server.views({
+                engines: { html: Handlebars },
+                path: __dirname + '/templates/valid',
+
+                context: function (request) {
+
+                    return {
+                        message: request ? request.route.path : 'default message',
+
+                        query: {
+                            test: 'global'
+                        }
+                    };
+                }
+            });
+
+            const handler = function (request, h) {
+
+                return h.view('testContext');
+            };
+
+            server.route({ method: 'GET', path: '/', handler });
+            const res = await server.inject('/');
+            expect(res.payload).to.contain('<h1>/</h1>');
+            expect(res.payload).to.contain('<h1>global</h1>');
+        });
+    });
+
+    describe('_bustRequireChache()', () => {
+
+        it('checks that if a file was loaded and is in cache - it is removed correctly', () => {
+
+            const modulePath = Path.resolve(__dirname, 'testModule.cjs');
+            require(modulePath);
+            const options = {
+                engines: {
+                    html: {
+                        module: Handlebars,
+                        path: __dirname + '/templates/valid'
+                    }
+                },
+                context: {
+                    a: 1
+                }
+            };
+
+            const server = Hapi.server();
+            const manager = new Manager(server, options);
+            const moduleKey = require.resolve(modulePath);
+            const moduleRef = require.cache[moduleKey];
+
+            expect(require.cache[moduleKey]).to.exist();
+            const parentRef = require.cache[moduleKey].parent;
+            expect(parentRef.children).to.include(moduleRef);
+            manager._bustRequireCache(modulePath);
+            expect(require.cache[moduleKey]).to.not.exist();
+            expect(parentRef.children).to.not.include(moduleRef);
+        });
+
+        it('does not throw when calling with module that was already removed', () => {
+
+            const modulePath = Path.resolve(__dirname, 'testModule.cjs');
+            require(modulePath);
+            const options = {
+                engines: {
+                    html: {
+                        module: Handlebars,
+                        path: __dirname + '/templates/valid'
+                    }
+                },
+                context: {
+                    a: 1
+                }
+            };
+
+            const server = Hapi.server();
+            const manager = new Manager(server, options);
+            manager._bustRequireCache(modulePath);
+            expect(manager._bustRequireCache.bind(manager, modulePath)).to.not.throw();
+        });
+    });
+});
